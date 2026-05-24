@@ -1,11 +1,3 @@
-const express = require('express');
-const app = express();
-app.get('/', (req, res) => res.send('Bot is Live!'));
-app.listen(process.env.PORT || 3000);
-
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-// ... unga matha code ellam idhukku kela irukanum
 const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
 const crypto      = require('crypto');
@@ -22,12 +14,32 @@ const REG_LINK     = "https://www.goaoko.com/#/register?invitationCode=457367799
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
 
-const BET_URL      = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
-const LOGIN_URL    = "https://api.goa7777.com/api/webapi/Login";
-const CAPTCHA_URL  = "https://api.goa7777.com/api/webapi/GetCaptcha";
-const DRAW_URL     = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
+const LOGIN_URL   = "https://api.goa7777.com/api/webapi/Login";
+const CAPTCHA_URL = "https://api.goa7777.com/api/webapi/GetCaptcha";
+const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 
+// Martingale multipliers — user can customize base bet
 const MULT = [1,3,7,18,38,74,170,400,850,1900];
+
+// ============================================================
+//  RENDER KEEP-ALIVE — Prevent render free tier sleep
+// ============================================================
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('SIVA BOT OK');
+}).listen(PORT, () => console.log(`✅ Keep-alive server on port ${PORT}`));
+
+// Self-ping every 14 minutes to prevent sleep
+const RENDER_URL = process.env.RENDER_URL || "";
+if (RENDER_URL) {
+    setInterval(() => {
+        axios.get(RENDER_URL).catch(() => {});
+        console.log("[PING] Keep-alive ping sent");
+    }, 14 * 60 * 1000);
+}
 
 // ============================================================
 //  STORAGE
@@ -43,7 +55,7 @@ let sentPeriods    = {};
 let ownerState     = null;
 let adminState     = {};
 let userTokens     = {};
-let userCreds      = {};   // userId -> { phone, pass, deviceId }
+let userCreds      = {};
 let autobetCfg     = {};
 let autobetState   = {};
 let profitTrack    = {};
@@ -95,7 +107,7 @@ function allKeysList() {
 }
 
 // ============================================================
-//  DEVICE ID — UUID format like browser: "1ee02b32131314688453c6adde9f2ffa"
+//  DEVICE ID
 // ============================================================
 function getOrCreateDevice(userId) {
     if (!userCreds[userId]) userCreds[userId] = {};
@@ -106,41 +118,19 @@ function getOrCreateDevice(userId) {
 }
 
 // ============================================================
-//  LOGIN SIGNATURE — CONFIRMED FROM BROWSER DEVTOOLS
-//  Payload from browser:
-//    username:  "916381605525"  (country code + number)
-//    phonetype: 0               (number, NOT 1)
-//    language:  0               (number)
-//    random:    "46c3c9f6..."   (hex string)
-//    captchaId: "ac7e4fc3-..."  (UUID)
-//    deviceId:  "1ee02b32..."   (hex)
-//    logintype: "mobile"
-//    packId:    ""
-//    pwd:       "password"
-//    timestamp: 1779589644      (excluded from signature)
-//    track:     {...}           (excluded from signature)
-//
-//  Signature = MD5(JSON.stringify(sorted_params_without_timestamp_track_empty))
-//  Result: "CC6E069BCA508301EB4094C2DD1212C5" ✅
+//  SIGNATURES
 // ============================================================
 function makeLoginSign(params) {
     const p = {...params};
-    delete p.signature;
-    delete p.timestamp;
-    delete p.track;
-
-    // Filter: exclude null, empty string, objects
+    delete p.signature; delete p.timestamp; delete p.track;
     const keys = Object.keys(p).filter(k => {
         const v = p[k];
-        if (v === null || v === undefined) return false;
-        if (v === "") return false;
+        if (v === null || v === undefined || v === "") return false;
         if (typeof v === 'object') return false;
         return true;
     }).sort();
-
     const sorted = {};
     keys.forEach(k => { sorted[k] = p[k]; });
-
     const str = JSON.stringify(sorted);
     console.log("[LOGIN SIG INPUT]", str);
     const sig = crypto.createHash('md5').update(str).digest('hex').toUpperCase().slice(0,32);
@@ -148,13 +138,9 @@ function makeLoginSign(params) {
     return sig;
 }
 
-// ============================================================
-//  BET SIGNATURE — Same algorithm
-// ============================================================
 function makeBetSign(params) {
     const p = {...params};
-    delete p.signature;
-    delete p.timestamp;
+    delete p.signature; delete p.timestamp;
     const keys = Object.keys(p).filter(k=>p[k]!==null&&p[k]!=="").sort();
     const sorted = {};
     keys.forEach(k=>{ sorted[k]=p[k]===0?0:p[k]; });
@@ -162,7 +148,7 @@ function makeBetSign(params) {
 }
 
 // ============================================================
-//  FETCH CAPTCHA — Required for login
+//  FETCH CAPTCHA
 // ============================================================
 async function fetchCaptcha() {
     try {
@@ -176,11 +162,9 @@ async function fetchCaptcha() {
             },
             timeout: 10000
         });
-        if (r.data?.code === 0 && r.data?.data?.captchaId) {
-            console.log("[CAPTCHA] ID:", r.data.data.captchaId);
+        if (r.data?.code===0 && r.data?.data?.captchaId) {
             return r.data.data.captchaId;
         }
-        console.log("[CAPTCHA] No captchaId:", JSON.stringify(r.data).substr(0,100));
         return "";
     } catch(e) {
         console.error("[CAPTCHA ERR]", e.message);
@@ -189,12 +173,12 @@ async function fetchCaptcha() {
 }
 
 // ============================================================
-//  AUTO LOGIN — EXACT BROWSER PAYLOAD
+//  AUTO LOGIN
 // ============================================================
 let loginLock = {};
 
 async function autoLogin(userId, chatId, silent=false) {
-    if (loginLock[userId]) { console.log("[LOGIN] Lock active for", userId); return false; }
+    if (loginLock[userId]) return false;
     loginLock[userId] = true;
 
     const creds = userCreds[userId] || {};
@@ -206,45 +190,33 @@ async function autoLogin(userId, chatId, silent=false) {
         if (!silent && chatId) await send(chatId,
 "❌ Phone/Password இல்லை!\n\n"+
 "Format:\n/setcreds FULLPHONE PASSWORD\n\n"+
-"Example (India +91):\n/setcreds 916381605525 suthamari6381\n\n"+
-"Note: Phone = country code + number\n"+
-"India: 91 + 6381605525 = 916381605525"
+"Example (India +91):\n/setcreds 916381605525 mypassword\n\n"+
+"Phone = CountryCode + Number\n"+
+"India: 91+6381605525 = 916381605525"
         );
         return false;
     }
 
-    // Step 1: Fetch captcha UUID
     const captchaId = await fetchCaptcha();
+    const deviceId  = getOrCreateDevice(userId);
+    const rand      = crypto.randomBytes(16).toString('hex');
+    const ts        = Math.floor(Date.now() / 1000);
 
-    const deviceId = getOrCreateDevice(userId);
-    // random = hex string (confirmed from browser)
-    const rand = crypto.randomBytes(16).toString('hex');
-    const ts   = Math.floor(Date.now() / 1000);
-
-    // EXACT payload matching browser DevTools
     const payload = {
-        captchaId:  captchaId,      // UUID from GetCaptcha API
-        deviceId:   deviceId,       // hex string
-        language:   0,              // number 0
-        logintype:  "mobile",
-        packId:     "",
-        phonetype:  0,              // number 0 (confirmed from browser!)
-        pwd:        pass,
-        random:     rand,           // hex string (confirmed!)
-        timestamp:  ts,
-        username:   phone,          // full: "916381605525"
-        track: {
-            backgroundImageWidth:  340,
-            backgroundImageHeight: 212,
-            sliderImageWidth:      68,
-            sliderImageHeight:     212
-        }
+        captchaId, deviceId,
+        language:  0,
+        logintype: "mobile",
+        packId:    "",
+        phonetype: 0,
+        pwd:       pass,
+        random:    rand,
+        timestamp: ts,
+        username:  phone,
+        track: { backgroundImageWidth:340, backgroundImageHeight:212, sliderImageWidth:68, sliderImageHeight:212 }
     };
-
-    // Generate signature (excludes timestamp, track, empty captchaId if empty)
     payload.signature = makeLoginSign(payload);
 
-    console.log("[LOGIN] User:", phone, "Rand:", rand.slice(0,8), "CaptchaId:", captchaId.slice(0,8)||"none");
+    console.log("[LOGIN] Phone:", phone, "CaptchaId:", captchaId.slice(0,8)||"none");
 
     try {
         const r = await axios.post(LOGIN_URL, payload, {
@@ -262,39 +234,32 @@ async function autoLogin(userId, chatId, silent=false) {
         const res = r.data;
         console.log("[LOGIN RESP] code:", res.code, "msg:", res.msg);
 
-        if (res.code === 0 && res.data?.token) {
+        if (res.code===0 && res.data?.token) {
             userTokens[userId] = res.data.token;
-            console.log("[LOGIN OK] Token:...", res.data.token.slice(-10));
+            console.log("[LOGIN OK]");
             if (!silent && chatId) await send(chatId,
-"✅ Login Success!\n"+
-"📱 "+phone+"\n"+
-"🔑 Token auto-refreshed!\n\n"+
-"AutoBet இப்போ work ஆகும்!"
+"✅ Login Success!\n📱 "+phone+"\n🔑 Token ready!\n\nAutoBet enable பண்ணு!"
             );
             loginLock[userId] = false;
             return true;
         }
 
-        if (res.msg?.toLowerCase().includes("captcha") || res.msg?.toLowerCase().includes("verify")) {
+        if (res.msg?.toLowerCase().includes("captcha")||res.msg?.toLowerCase().includes("verify")) {
             if (!silent && chatId) await send(chatId,
-"⚠️ Captcha required!\n\n"+
-"Slider captcha bypass பண்ண முடியல.\n"+
-"Manual token use பண்ணு:\n"+
-"/setmytoken TOKEN\n\n"+
-"Token: goaokk.com → Login → F12 → Network → WinGoBet → Authorization"
+"⚠️ Captcha required!\nManual token use பண்ணு:\n/setmytoken TOKEN"
             );
             loginLock[userId] = false;
             return false;
         }
 
         console.log("[LOGIN FAIL]", JSON.stringify(res).substr(0,150));
-        if (!silent && chatId) await send(chatId, "❌ Login fail: " + (res.msg || "code:"+res.code));
+        if (!silent && chatId) await send(chatId, "❌ Login fail: "+(res.msg||"code:"+res.code));
         loginLock[userId] = false;
         return false;
 
     } catch(err) {
         console.error("[LOGIN ERR]", err.message);
-        if (!silent && chatId) await send(chatId, "❌ Login error: " + err.message);
+        if (!silent && chatId) await send(chatId, "❌ Login error: "+err.message);
         loginLock[userId] = false;
         return false;
     }
@@ -307,7 +272,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
     let token = getToken(userId);
     if (!token || token.length < 20) {
         const ok = await autoLogin(userId, chatId, true);
-        if (!ok) { await send(chatId,"❌ Token இல்லை!\n/setmytoken TOKEN\nor\n/setcreds FULLPHONE PASSWORD"); return false; }
+        if (!ok) { await send(chatId,"❌ Token இல்லை!\n/setcreds FULLPHONE PASSWORD"); return false; }
         token = getToken(userId);
     }
 
@@ -330,7 +295,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
     const timestamp = Math.floor(Date.now()/1000);
     const payload   = {...params, signature, timestamp};
 
-    console.log(`[BET] ${bc} ₹${betMult} L${level} Period:${String(period).slice(-6)}`);
+    console.log(`[BET] ${bc} ₹${betMult} L${level}`);
 
     try {
         const r = await axios.post(BET_URL, payload, {
@@ -374,10 +339,54 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
 }
 
 // ============================================================
+//  FETCH HISTORY — Multiple fallback URLs for reliability
+// ============================================================
+const DRAW_URLS = [
+    "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json",
+    "https://api.ar-lottery01.com/api/Lottery/WinGoHistory?gameCode=WinGo_1M&pageNo=1&pageSize=20"
+];
+
+function decodeBuffer(buf) {
+    try{return JSON.parse(buf.toString("utf8"));}catch(e){}
+    try{return JSON.parse(zlib.gunzipSync(buf).toString("utf8"));}catch(e){}
+    try{return JSON.parse(zlib.inflateSync(buf).toString("utf8"));}catch(e){}
+    try{return JSON.parse(zlib.inflateRawSync(buf).toString("utf8"));}catch(e){}
+    try{return JSON.parse(zlib.brotliDecompressSync(buf).toString("utf8"));}catch(e){}
+    return null;
+}
+
+async function fetchList(retries=3) {
+    for(let attempt=0; attempt<retries; attempt++){
+        for(const url of DRAW_URLS){
+            try{
+                const res = await axios.get(url+"?ts="+Date.now(), {
+                    headers:{
+                        "User-Agent":       "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+                        "Accept":           "application/json, text/plain, */*",
+                        "Accept-Encoding":  "gzip, deflate, br",
+                        "Origin":           "https://goaokk.com",
+                        "Referer":          "https://goaokk.com/"
+                    },
+                    timeout:12000, decompress:true, responseType:"arraybuffer"
+                });
+                const data = decodeBuffer(Buffer.from(res.data));
+                if(!data) continue;
+                const list = data?.data?.list || data?.data?.rows || data?.list;
+                if(list && list.length>0) return list;
+            }catch(e){
+                console.error(`Fetch attempt ${attempt+1} url fail:`, e.message);
+            }
+        }
+        if(attempt < retries-1) await sleep(5000);
+    }
+    return null;
+}
+
+// ============================================================
 //  PREDICTION ENGINE
 // ============================================================
 function parseResult(item) {
-    const n=parseInt(item.number);
+    const n = parseInt(item.number||item.winNumber||0);
     return {n, size:n>=5?"BIG":"SMALL", color:n===0?"RED":n===5?"GREEN":n%2===0?"RED":"GREEN"};
 }
 function stk(arr,k){let c=1;for(let i=1;i<arr.length;i++){if(arr[i][k]===arr[0][k])c++;else break;}return{val:arr[0][k],count:c};}
@@ -395,7 +404,7 @@ function detectSignal(list) {
     const szS=stk(d10,"size"),clS=stk(d10,"color");
     const sizeDragon=isDragon(d10,"size"),colorDragon=isDragon(d10,"color");
 
-    // SIZE
+    // SIZE patterns
     if(szS.count>=5&&szS.count<6)c.push({type:"SIZE",val:szS.val==="BIG"?"SMALL":"BIG",conf:95,pat:"5 STREAK BREAK"});
     else if(szS.count===4)c.push({type:"SIZE",val:szS.val==="BIG"?"SMALL":"BIG",conf:91,pat:"4 STREAK BREAK"});
     else if(szS.count===3)c.push({type:"SIZE",val:szS.val==="BIG"?"SMALL":"BIG",conf:90,pat:"3 STREAK BREAK"});
@@ -420,7 +429,7 @@ function detectSignal(list) {
     if(isDbl(d8,"size"))c.push({type:"SIZE",val:d8[6].size==="BIG"?"SMALL":"BIG",conf:91,pat:"DOUBLE PAIR"});
     if(isTrp(d6,"size"))c.push({type:"SIZE",val:d6[3].size,conf:91,pat:"TRIPLE PAIR"});
 
-    // COLOR
+    // COLOR patterns
     if(clS.count>=5&&clS.count<6)c.push({type:"COLOR",val:clS.val==="RED"?"GREEN":"RED",conf:95,pat:"5 STREAK BREAK"});
     else if(clS.count===4)c.push({type:"COLOR",val:clS.val==="RED"?"GREEN":"RED",conf:91,pat:"4 STREAK BREAK"});
     else if(clS.count===3)c.push({type:"COLOR",val:clS.val==="RED"?"GREEN":"RED",conf:90,pat:"3 STREAK BREAK"});
@@ -451,33 +460,6 @@ function detectSignal(list) {
 }
 
 // ============================================================
-//  FETCH HISTORY
-// ============================================================
-function decodeBuffer(buf) {
-    try{return JSON.parse(buf.toString("utf8"));}catch(e){}
-    try{return JSON.parse(zlib.gunzipSync(buf).toString("utf8"));}catch(e){}
-    try{return JSON.parse(zlib.inflateSync(buf).toString("utf8"));}catch(e){}
-    try{return JSON.parse(zlib.inflateRawSync(buf).toString("utf8"));}catch(e){}
-    try{return JSON.parse(zlib.brotliDecompressSync(buf).toString("utf8"));}catch(e){}
-    return null;
-}
-async function fetchList(retries=3) {
-    for(let i=0;i<retries;i++){
-        try{
-            const res=await axios.get(DRAW_URL+"?ts="+Date.now(),{
-                headers:{"User-Agent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36","Accept":"application/json, text/plain, */*","Accept-Encoding":"gzip, deflate, br","Origin":"https://goaokk.com","Referer":"https://goaokk.com/"},
-                timeout:10000,decompress:true,responseType:"arraybuffer"
-            });
-            const data=decodeBuffer(Buffer.from(res.data));
-            if(!data)continue;
-            const list=data?.data?.list;
-            if(list&&list.length>0)return list;
-        }catch(e){console.error("Fetch",i+1,":",e.message);if(i<retries-1)await sleep(3000);}
-    }
-    return null;
-}
-
-// ============================================================
 //  AUTOBET LOGIC
 // ============================================================
 function shouldBetNow(userId) {
@@ -497,15 +479,15 @@ async function handleWin(userId, chatId, actual, num) {
     st.level=1;st.inMart=false;st.consecutiveLoss=0;
     await send(chatId,
 "╔══════════════════════════╗\n"+
-"║  ✅  WIN! 🎉🎊           ║\n"+
+"║  ✅ WIN! 🎉              ║\n"+
 "╠══════════════════════════╣\n"+
-"║ 🔢 Number : "+num+"\n"+
-"║ 🎯 Result : "+actual+"\n"+
-"║ 💰 Profit : +₹"+profit.toFixed(2)+"\n"+
-"║ 📊 P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
-"║ 🔥 Streak : "+pt.winStreak+" wins\n"+
-"║ 📈 Total  : "+pt.wins+"W / "+pt.losses+"L\n"+
-"║ 🔄 Reset → L1, Watch 0/"+cfg.watchLoss+"\n"+
+"║ Number : "+num+"\n"+
+"║ Result : "+actual+"\n"+
+"║ Profit : +₹"+profit.toFixed(2)+"\n"+
+"║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
+"║ Streak : "+pt.winStreak+" wins\n"+
+"║ Total  : "+pt.wins+"W/"+pt.losses+"L\n"+
+"║ Reset  : L1 | Watch 0/"+cfg.watchLoss+"\n"+
 "╚══════════════════════════╝"
     );
     await sendSticker(chatId,WIN_STICKER);
@@ -521,14 +503,14 @@ async function handleLoss(userId, chatId, actual, num) {
         const next=cfg.baseBet*MULT[st.level-1];
         await send(chatId,
 "╔══════════════════════════╗\n"+
-"║  ❌  LOSS                ║\n"+
+"║  ❌ LOSS                 ║\n"+
 "╠══════════════════════════╣\n"+
-"║ 🔢 Number : "+num+"\n"+
-"║ 🎯 Result : "+actual+"\n"+
-"║ 💸 Loss   : -₹"+amt+"\n"+
-"║ 📊 P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
+"║ Number : "+num+"\n"+
+"║ Result : "+actual+"\n"+
+"║ Loss   : -₹"+amt+"\n"+
+"║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
 "╠══════════════════════════╣\n"+
-"║ 📈 Next L"+st.level+" : ₹"+next+"\n"+
+"║ Next L"+st.level+" : ₹"+next+"\n"+
 "╚══════════════════════════╝"
         );
         await sendSticker(chatId,LOSS_STICKER);
@@ -538,9 +520,9 @@ async function handleLoss(userId, chatId, actual, num) {
 "╔══════════════════════════╗\n"+
 "║  💀 MAX LEVEL LOSS       ║\n"+
 "╠══════════════════════════╣\n"+
-"║ 💸 Loss   : -₹"+amt+"\n"+
-"║ 📊 P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
-"║ 🔄 Reset → L1, Watch 0/"+cfg.watchLoss+"\n"+
+"║ Loss   : -₹"+amt+"\n"+
+"║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
+"║ Reset  : L1 | Watch 0/"+cfg.watchLoss+"\n"+
 "╚══════════════════════════╝"
         );
         await sendSticker(chatId,LOSS_STICKER);
@@ -552,17 +534,19 @@ async function handleLoss(userId, chatId, actual, num) {
 // ============================================================
 async function runPredict(userId, chatId) {
     if(!running[userId])return;
-    const list=await fetchList();
-    if(!list){
-        await send(chatId,"⚠️ API error, retry...");
-        return setTimeout(()=>runPredict(userId,chatId),10000);
-    }
-    const next=(BigInt(list[0].issueNumber)+1n).toString();
-    const signal=detectSignal(list);
 
-    const data10=list.slice(0,10).map(i=>{const n=parseInt(i.number);return{size:n>=5?"BIG":"SMALL",color:n===0?"RED":n===5?"GREEN":n%2===0?"RED":"GREEN"};});
+    const list = await fetchList();
+    if(!list){
+        await send(chatId,"⚠️ API error — retrying in 15s...");
+        return setTimeout(()=>runPredict(userId,chatId), 15000);
+    }
+
+    const next   = (BigInt(list[0].issueNumber)+1n).toString();
+    const signal = detectSignal(list);
+
+    const data10=list.slice(0,10).map(parseResult);
     const szS=stk(data10,"size"),clS=stk(data10,"color");
-    const dragonInfo=szS.count>=6?"🐉 SIZE: "+szS.val+" x"+szS.count:clS.count>=6?"🐉 COLOR: "+clS.val+" x"+clS.count:"";
+    const dragonInfo=szS.count>=6?"🐉 SIZE:"+szS.val+" x"+szS.count:clS.count>=6?"🐉 COLOR:"+clS.val+" x"+clS.count:"";
 
     if(!signal){
         const sk="SK_"+next;
@@ -570,30 +554,30 @@ async function runPredict(userId, chatId) {
             sentPeriods[userId].add(sk);
             await send(chatId,
 "╔══════════════════════════╗\n"+
-"║   ⏭️  SKIP               ║\n"+
+"║   ⏭️ SKIP                ║\n"+
 "╠══════════════════════════╣\n"+
-"║ 📅 Period: "+next.slice(-6)+"\n"+
+"║ Period : "+next.slice(-6)+"\n"+
 (dragonInfo?"║ "+dragonInfo+"\n":"")+
-"║ 🚫 No 90%+ safe pattern\n"+
-"║ ⏳ Waiting...\n"+
+"║ No 90%+ pattern\n"+
+"║ Waiting next signal...\n"+
 "╚══════════════════════════╝"
             );
         }
-        return setTimeout(()=>runPredict(userId,chatId),20000);
+        return setTimeout(()=>runPredict(userId,chatId), 20000);
     }
 
-    if(sentPeriods[userId].has(next))return setTimeout(()=>runPredict(userId,chatId),5000);
+    if(sentPeriods[userId].has(next)) return setTimeout(()=>runPredict(userId,chatId), 5000);
     sentPeriods[userId].add(next);
-    if(sentPeriods[userId].size>50)sentPeriods[userId]=new Set([...sentPeriods[userId]].slice(-50));
+    if(sentPeriods[userId].size>50) sentPeriods[userId]=new Set([...sentPeriods[userId]].slice(-50));
 
     const st=autobetState[userId],cfg=autobetCfg[userId];
     const confBar="🟦".repeat(Math.round(signal.conf/10))+"⬜".repeat(10-Math.round(signal.conf/10));
-    const predDisplay=signal.type==="SIZE"?(signal.val==="BIG"?"🔵 BIG (5-9)":"🟠 SMALL (0-4)"):(signal.val==="RED"?"🔴 RED":"🟢 GREEN");
+    const predDisplay=signal.type==="SIZE"?(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL"):(signal.val==="RED"?"🔴 RED":"🟢 GREEN");
 
     let abLine="🤖 AutoBet: OFF";
     if(cfg.enabled){
         if(st.inMart) abLine="📈 MART L"+st.level+": ₹"+(cfg.baseBet*MULT[st.level-1]);
-        else if(cfg.watch&&st.consecutiveLoss<cfg.watchLoss) abLine="👀 Watch: "+st.consecutiveLoss+"/"+cfg.watchLoss+" losses";
+        else if(cfg.watch&&st.consecutiveLoss<cfg.watchLoss) abLine="👀 Watch: "+st.consecutiveLoss+"/"+cfg.watchLoss;
         else abLine="💰 BET: ₹"+(cfg.baseBet*MULT[st.level-1])+" L"+st.level;
     }
 
@@ -601,22 +585,22 @@ async function runPredict(userId, chatId) {
 "╔══════════════════════════╗\n"+
 "║  👑 SIVA ULTRA AI        ║\n"+
 "╠══════════════════════════╣\n"+
-"║ 📅 Period : "+next.slice(-6)+"\n"+
-"║ 🎯 Signal : "+predDisplay+"\n"+
-"║ 🏆 Pattern: "+signal.pat+"\n"+
-"║ 🔥 Conf   : "+signal.conf+"%\n"+
+"║ Period  : "+next.slice(-6)+"\n"+
+"║ Signal  : "+predDisplay+"\n"+
+"║ Pattern : "+signal.pat+"\n"+
+"║ Conf    : "+signal.conf+"%\n"+
 "║ "+confBar+"\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 "╠══════════════════════════╣\n"+
-"║ ⚡ BET ON: "+signal.val+"\n"+
+"║ BET ON  : "+signal.val+"\n"+
 "╚══════════════════════════╝",
         {reply_markup:{inline_keyboard:[[{text:"💰 GOAOKO PLAY NOW",url:REG_LINK}]]}}
     );
 
     if(cfg.enabled&&shouldBetNow(userId)){
         const result=await placeBet(userId,chatId,next,signal.val,signal.type,st.level);
-        if(result&&result.ok) await send(chatId,"✅ Bet Placed!\n"+result.bc+" ₹"+result.amt+" L"+st.level+"\n⏳ Result checking...");
+        if(result&&result.ok) await send(chatId,"✅ Bet OK! "+result.bc+" ₹"+result.amt+" L"+st.level+"\n⏳ Checking result...");
     }
     checkResult(userId,chatId,next,signal.val,signal.type);
 }
@@ -630,12 +614,18 @@ async function checkResult(userId, chatId, target, predicted, predType) {
     const wasReal=cfg.enabled&&shouldBetNow(userId);
     const iv=setInterval(async()=>{
         if(!running[userId])return clearInterval(iv);
-        if(++tries>18){clearInterval(iv);await send(chatId,"⏱ Timeout");setTimeout(()=>{if(running[userId])runPredict(userId,chatId);},3000);return;}
+        if(++tries>20){
+            clearInterval(iv);
+            await send(chatId,"⏱ Timeout — next...");
+            setTimeout(()=>{if(running[userId])runPredict(userId,chatId);},3000);
+            return;
+        }
         const list=await fetchList();if(!list)return;
         if(BigInt(list[0].issueNumber)<BigInt(target))return;
         clearInterval(iv);
+
         const res=list.find(i=>i.issueNumber===target)||list[0];
-        const num=parseInt(res.number);
+        const num=parseInt(res.number||res.winNumber||0);
         let actual;
         if(predType==="SIZE")actual=num>=5?"BIG":"SMALL";
         else actual=num===0?"RED":num===5?"GREEN":num%2===0?"RED":"GREEN";
@@ -653,10 +643,10 @@ async function checkResult(userId, chatId, target, predicted, predType) {
                 if(!win){
                     st.consecutiveLoss++;
                     const need=cfg.watchLoss-st.consecutiveLoss;
-                    await send(chatId,"👀 Watch Loss: "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+(need>0?"⏳ "+need+" more needed...":"🚀 Real bet starts next signal!"));
+                    await send(chatId,"👀 Watch Loss: "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+(need>0?"⏳ "+need+" more...":"🚀 Real bet next signal!"));
                 } else {
                     st.consecutiveLoss=0;
-                    await send(chatId,"👀 Watch ✅ Correct! (virtual)\n🔄 Loss counter reset → 0/"+cfg.watchLoss);
+                    await send(chatId,"👀 Watch ✅ Correct!\n🔄 Reset → 0/"+cfg.watchLoss);
                 }
             }
         } else {
@@ -668,40 +658,42 @@ async function checkResult(userId, chatId, target, predicted, predType) {
 }
 
 // ============================================================
-//  STATS & PROFIT
+//  STATS
 // ============================================================
 function showStats(chatId,userId){
     const d=stats[userId],rate=d.total?((d.win/d.total)*100).toFixed(1):"0.0";
     const bar="🟦".repeat(d.total?Math.round(d.win/d.total*10):0)+"⬜".repeat(d.total?10-Math.round(d.win/d.total*10):10);
-    send(chatId,"╔══════════════════════════╗\n║  📊 STATS                ║\n╠══════════════════════════╣\n"+"║ Total  : "+d.total+"\n║ Wins   : "+d.win+"\n║ Losses : "+d.loss+"\n"+"║ Acc    : "+rate+"%\n║ "+bar+"\n╠══════════════════════════╣\n"+"║ Best Win  : "+d.maxWinStreak+" streak\n║ Worst Loss: "+d.maxLossStreak+" streak\n╚══════════════════════════╝");
+    send(chatId,"📊 STATS\n\nTotal: "+d.total+"\nWins: "+d.win+"\nLosses: "+d.loss+"\nAcc: "+rate+"%\n"+bar+"\n\nBest Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak");
 }
 function profitReport(chatId,userId){
     const pt=profitTrack[userId],cfg=autobetCfg[userId];
     const rate=pt.totalBets?((pt.wins/pt.totalBets)*100).toFixed(1):"0.0";
-    const bar="🟦".repeat(pt.totalBets?Math.round(pt.wins/pt.totalBets*10):0)+"⬜".repeat(pt.totalBets?10-Math.round(pt.wins/pt.totalBets*10):10);
     const amounts=MULT.slice(0,cfg.maxLvl).map(m=>cfg.baseBet*m);
-    send(chatId,"╔══════════════════════════╗\n║  💰 PROFIT REPORT        ║\n╠══════════════════════════╣\n"+"║ Bets   : "+pt.totalBets+"\n║ Wins   : "+pt.wins+"\n║ Losses : "+pt.losses+"\n"+"║ Rate   : "+rate+"%\n║ "+bar+"\n╠══════════════════════════╣\n"+"║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+"║ Best W : "+pt.maxW+" streak\n║ Worst L: "+pt.maxL+" streak\n╠══════════════════════════╣\n"+"║ Mart   : ₹"+amounts.join("→₹")+"\n╚══════════════════════════╝");
+    send(chatId,
+"💰 PROFIT REPORT\n\n"+
+"Bets  : "+pt.totalBets+"\nWins  : "+pt.wins+"\nLoss  : "+pt.losses+"\nRate  : "+rate+"%\n"+
+"P&L   : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
+"Best W: "+pt.maxW+" | Worst L: "+pt.maxL+"\n\n"+
+"Mart: ₹"+amounts.join("→₹")
+    );
 }
 function autobetStatus(chatId,userId){
     const cfg=autobetCfg[userId],st=autobetState[userId],pt=profitTrack[userId];
-    const tok=getToken(userId);
-    const creds=userCreds[userId]||{};
     const amounts=MULT.slice(0,cfg.maxLvl).map(m=>cfg.baseBet*m);
+    const creds=userCreds[userId]||{};
     send(chatId,
-"╔══════════════════════════╗\n║  🤖 AUTOBET STATUS       ║\n╠══════════════════════════╣\n"+
-"║ AutoBet   : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
-"║ Token     : "+(tok.length>20?"✅ SET":"❌ MISSING")+"\n"+
-"║ AutoLogin : "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ /setcreds")+"\n"+
-"║ Watch     : "+(cfg.watch?"ON":"OFF")+"\n"+
-"║ WatchLoss : "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+
-"║ Base Bet  : ₹"+cfg.baseBet+"\n"+
-"║ Max Level : "+cfg.maxLvl+"\n"+
-"╠══════════════════════════╣\n"+
-"║ Mart Lvl  : L"+st.level+"\n"+
-"║ In Mart   : "+(st.inMart?"YES":"NO")+"\n"+
-"║ P&L       : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
-"╠══════════════════════════╣\n"+
-"║ ₹"+amounts.join("→₹")+"\n╚══════════════════════════╝"
+"🤖 AUTOBET STATUS\n\n"+
+"Enabled  : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
+"Token    : "+(getToken(userId).length>20?"✅":"❌")+"\n"+
+"AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌")+"\n"+
+"Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
+"WatchLoss: "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+
+"Base Bet : ₹"+cfg.baseBet+"\n"+
+"Max Level: "+cfg.maxLvl+"\n"+
+"Mart Lvl : L"+st.level+"\n"+
+"In Mart  : "+(st.inMart?"YES":"NO")+"\n"+
+"P&L      : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n\n"+
+"Mart: ₹"+amounts.join("→₹")
     );
 }
 
@@ -739,14 +731,13 @@ async function sendSticker(chatId,sid){try{await bot.sendSticker(chatId,sid);}ca
 //  HANDLERS
 // ============================================================
 function addHandlers(){
-
     bot.onText(/\/start/,(msg)=>{
         const id=msg.from.id;initUser(id);
         const status=hasAccess(id)?"✅ ACTIVE — "+daysLeft(id)+"d left":"❌ NO ACCESS";
         send(msg.chat.id,
 "╔══════════════════════════╗\n║  👑 SIVA ULTRA AI BOT    ║\n╠══════════════════════════╣\n"+
 "║ Status : "+status+"\n║ ID     : "+id+"\n║ Admin  : "+ADMIN_HANDLE+"\n╠══════════════════════════╣\n"+
-"║ 🔑 /key CODE to activate ║\n╚══════════════════════════╝",
+"║ /key CODE to activate    ║\n╚══════════════════════════╝",
         {reply_markup:userMenu(id)});
     });
 
@@ -757,23 +748,15 @@ function addHandlers(){
         else send(msg.chat.id,res.msg);
     });
 
-    // FIXED: /setcreds FULLPHONE PASSWORD
-    // phone = country code + number (e.g. 916381605525)
     bot.onText(/\/setcreds (.+)/,(msg,match)=>{
         const id=msg.from.id;
         if(!hasAccess(id))return send(id,"❌ No access.");
         const parts=match[1].trim().split(/\s+/);
-        if(parts.length<2)return send(id,
-"❌ Format:\n/setcreds FULLPHONE PASSWORD\n\n"+
-"Example (India +91):\n/setcreds 916381605525 mypassword\n\n"+
-"Phone = CountryCode + Number\n"+
-"India 91 + 6381605525 = 916381605525"
-        );
-        const phone=parts[0], pass=parts.slice(1).join(" ");
+        if(parts.length<2)return send(id,"❌ Format:\n/setcreds FULLPHONE PASSWORD\n\nExample:\n/setcreds 916381605525 mypassword");
+        const phone=parts[0],pass=parts.slice(1).join(" ");
         if(!userCreds[id])userCreds[id]={};
-        userCreds[id].phone=phone;
-        userCreds[id].pass=pass;
-        send(id,"✅ Credentials saved!\n📱 "+phone+"\n\n🔄 Testing login...");
+        userCreds[id].phone=phone;userCreds[id].pass=pass;
+        send(id,"✅ Saved!\n📱 "+phone+"\n🔄 Testing login...");
         autoLogin(id,msg.chat.id,false);
     });
 
@@ -783,7 +766,7 @@ function addHandlers(){
         const tok=match[1].trim().replace(/^Bearer\s+/i,"");
         if(tok.length<20)return send(id,"❌ Token too short!");
         userTokens[id]=tok;
-        send(id,"✅ Token saved!\n..."+tok.slice(-12)+"\n\n🤖 AutoBet Setup → ✅ Enable AutoBet");
+        send(id,"✅ Token saved!\n..."+tok.slice(-12)+"\n\n🤖 AutoBet Setup → ✅ Enable");
     });
 
     bot.onText(/\/login/,(msg)=>{
@@ -814,20 +797,18 @@ function addHandlers(){
         const OB=["👥 All Users","👮 All Admins","👤 Add Admin","🗑 Remove Admin","🔑 Generate Key","📋 All Keys","🟢 Add User","🔴 Remove User","🔐 Set Token","📊 All Stats","🚪 Owner Logout"];
         const AB=["👥 Active Users","🔑 Generate Key","🟢 Add User","🔴 Remove User","📋 All Keys","🚪 Admin Logout"];
 
-        // OWNER STATE
         if(id===OWNER_ID&&ownerState){
             const s=ownerState;
-            if(s.action==="login"){if(text===OWNER_PASS){ownerLoggedIn=true;ownerState=null;return send(OWNER_ID,"👑 Welcome Boss!",{reply_markup:ownerMenu});}else return send(OWNER_ID,"❌ Wrong!");}
+            if(s.action==="login"){if(text===OWNER_PASS){ownerLoggedIn=true;ownerState=null;return send(OWNER_ID,"👑 Welcome!",{reply_markup:ownerMenu});}else return send(OWNER_ID,"❌ Wrong!");}
             if(OB.includes(text)){ownerState=null;}
-            else if(s.action==="addadmin"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌ Invalid");ownerState={action:"addadmin",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nPassword:");}else{if(text.length<6)return send(OWNER_ID,"❌ Min 6 chars");adminPasswords[s.tid]=text;adminLoggedIn[s.tid]=false;ownerState=null;send(OWNER_ID,"✅ Admin: "+s.tid,{reply_markup:ownerMenu});send(s.tid,"🎉 Admin!\n/adminlogin "+text);return;}}
-            else if(s.action==="removeadmin"){const t=parseInt(text);if(isNaN(t))return;delete adminPasswords[t];delete adminLoggedIn[t];ownerState=null;send(OWNER_ID,"🚫 "+t+" removed",{reply_markup:ownerMenu});return;}
-            else if(s.action==="genkey"){const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌ Days?");const k=generateKey(d,OWNER_ID);ownerState=null;return send(OWNER_ID,"🔑 Key:\n\n"+k+"\n\n"+d+"d\nUser: /key "+k,{reply_markup:ownerMenu});}
-            else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌ Invalid");ownerState={action:"adduser",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌ Invalid");usersAccess[s.tid]=Date.now()+d*86400000;ownerState=null;send(OWNER_ID,"✅ "+s.tid+" — "+d+"d",{reply_markup:ownerMenu});send(s.tid,"🎊 VIP! "+d+" days\n▶️ Start Prediction!");return;}}
-            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;const was=hasAccess(t);delete usersAccess[t];running[t]=false;ownerState=null;send(OWNER_ID,was?"🚫 "+t+" removed":"⚠️ Not active",{reply_markup:ownerMenu});if(was)send(t,"🔴 Access removed.");return;}
+            else if(s.action==="addadmin"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌");ownerState={action:"addadmin",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nPassword:");}else{if(text.length<6)return send(OWNER_ID,"❌ Min 6");adminPasswords[s.tid]=text;adminLoggedIn[s.tid]=false;ownerState=null;send(OWNER_ID,"✅ Admin: "+s.tid,{reply_markup:ownerMenu});send(s.tid,"🎉 Admin!\n/adminlogin "+text);return;}}
+            else if(s.action==="removeadmin"){const t=parseInt(text);if(isNaN(t))return;delete adminPasswords[t];delete adminLoggedIn[t];ownerState=null;send(OWNER_ID,"🚫 Removed",{reply_markup:ownerMenu});return;}
+            else if(s.action==="genkey"){const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌ Days?");const k=generateKey(d,OWNER_ID);ownerState=null;return send(OWNER_ID,"🔑 Key:\n\n"+k+"\n\n"+d+"d\n/key "+k,{reply_markup:ownerMenu});}
+            else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌");ownerState={action:"adduser",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌");usersAccess[s.tid]=Date.now()+d*86400000;ownerState=null;send(OWNER_ID,"✅ "+s.tid+" "+d+"d",{reply_markup:ownerMenu});send(s.tid,"🎊 VIP! "+d+" days\n▶️ Start Prediction!");return;}}
+            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;const was=hasAccess(t);delete usersAccess[t];running[t]=false;ownerState=null;send(OWNER_ID,was?"🚫 Removed":"⚠️ Not active",{reply_markup:ownerMenu});if(was)send(t,"🔴 Access removed.");return;}
             else if(s.action==="settoken"){GLOBAL_TOKEN=text.trim().replace(/^Bearer\s+/i,"");ownerState=null;return send(OWNER_ID,"✅ Global Token set!",{reply_markup:ownerMenu});}
         }
 
-        // OWNER MENU
         if(id===OWNER_ID&&ownerLoggedIn){
             if(text==="👥 All Users")    return send(OWNER_ID,"👥\n\n"+activeUsersList());
             if(text==="👮 All Admins")   return send(OWNER_ID,"👮\n\n"+adminList());
@@ -842,19 +823,17 @@ function addHandlers(){
             if(text==="🚪 Owner Logout") {ownerLoggedIn=false;return send(OWNER_ID,"🔒 Out.",{reply_markup:userMenu(id)});}
         }
 
-        // ADMIN STATE
         if(isAdmin(id)&&isAdminIn(id)&&adminState[id]){
             const s=adminState[id];
             if(AB.includes(text)){delete adminState[id];}
             else if(s.action==="genkey"){const d=parseInt(text);if(isNaN(d)||d<1)return send(id,"❌ Days?");const k=generateKey(d,id);delete adminState[id];return send(id,"🔑 Key:\n\n"+k+"\n\n"+d+"d",{reply_markup:adminMenu});}
-            else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(id,"❌ Invalid");adminState[id]={action:"adduser",step2:true,tid:t};return send(id,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(id,"❌ Invalid");usersAccess[s.tid]=Date.now()+d*86400000;delete adminState[id];send(id,"✅ "+s.tid+" — "+d+"d",{reply_markup:adminMenu});send(s.tid,"🎊 ACCESS! "+d+"d");return;}}
-            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;const was=hasAccess(t);delete usersAccess[t];running[t]=false;delete adminState[id];send(id,was?"🚫 "+t+" removed":"⚠️ Not active",{reply_markup:adminMenu});if(was)send(t,"🔴 Removed.");return;}
-            else if(s.action==="setbase"){const v=parseInt(text);if(isNaN(v)||v<1)return send(id,"❌ Min 1");autobetCfg[id].baseBet=v;delete adminState[id];const a=MULT.slice(0,autobetCfg[id].maxLvl).map(m=>v*m);return send(id,"✅ Base Bet: ₹"+v+"\nMart: ₹"+a.join("→₹"),{reply_markup:autobetMenu});}
-            else if(s.action==="setlvl"){const v=parseInt(text);if(isNaN(v)||v<1||v>10)return send(id,"❌ 1-10 only");autobetCfg[id].maxLvl=v;delete adminState[id];const a=MULT.slice(0,v).map(m=>autobetCfg[id].baseBet*m);return send(id,"✅ Max Level: "+v+"\nMart: ₹"+a.join("→₹"),{reply_markup:autobetMenu});}
-            else if(s.action==="setwloss"){const v=parseInt(text);if(isNaN(v)||v<1)return send(id,"❌ Min 1");autobetCfg[id].watchLoss=v;delete adminState[id];return send(id,"✅ Watch Losses: "+v+"\n"+v+" consecutive losses → real bet",{reply_markup:autobetMenu});}
+            else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(id,"❌");adminState[id]={action:"adduser",step2:true,tid:t};return send(id,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(id,"❌");usersAccess[s.tid]=Date.now()+d*86400000;delete adminState[id];send(id,"✅ "+s.tid+" "+d+"d",{reply_markup:adminMenu});send(s.tid,"🎊 ACCESS! "+d+"d");return;}}
+            else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;const was=hasAccess(t);delete usersAccess[t];running[t]=false;delete adminState[id];send(id,was?"🚫 Removed":"⚠️ Not active",{reply_markup:adminMenu});if(was)send(t,"🔴 Removed.");return;}
+            else if(s.action==="setbase"){const v=parseInt(text);if(isNaN(v)||v<1)return send(id,"❌ Min 1");autobetCfg[id].baseBet=v;delete adminState[id];const a=MULT.slice(0,autobetCfg[id].maxLvl).map(m=>v*m);return send(id,"✅ Base: ₹"+v+"\nMart: ₹"+a.join("→₹"),{reply_markup:autobetMenu});}
+            else if(s.action==="setlvl"){const v=parseInt(text);if(isNaN(v)||v<1||v>10)return send(id,"❌ 1-10");autobetCfg[id].maxLvl=v;delete adminState[id];const a=MULT.slice(0,v).map(m=>autobetCfg[id].baseBet*m);return send(id,"✅ Level: "+v+"\nMart: ₹"+a.join("→₹"),{reply_markup:autobetMenu});}
+            else if(s.action==="setwloss"){const v=parseInt(text);if(isNaN(v)||v<1)return send(id,"❌ Min 1");autobetCfg[id].watchLoss=v;delete adminState[id];return send(id,"✅ Watch: "+v+" consecutive losses → bet",{reply_markup:autobetMenu});}
         }
 
-        // ADMIN MENU
         if(isAdmin(id)&&isAdminIn(id)){
             if(text==="👥 Active Users") return send(id,"👥\n\n"+activeUsersList());
             if(text==="🔑 Generate Key") {adminState[id]={action:"genkey"};return send(id,"Days?");}
@@ -868,22 +847,20 @@ function addHandlers(){
             return send(id,"👑 Admin",{reply_markup:adminMenu});
         }
 
-        // AUTOBET SETUP
         if(text==="🤖 AutoBet Setup"){
             if(!hasAccess(id))return send(id,"❌ No access.");
             const cfg=autobetCfg[id],creds=userCreds[id]||{};
             const amounts=MULT.slice(0,cfg.maxLvl).map(m=>cfg.baseBet*m);
             return send(id,
 "🤖 AUTOBET SETTINGS\n\n"+
-"Status    : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
-"Token     : "+(getToken(id).length>20?"✅ SET":"❌ MISSING")+"\n"+
-"AutoLogin : "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ /setcreds")+"\n\n"+
-"Watch Mode: "+(cfg.watch?"ON":"OFF")+"\n"+
-"Watch Loss: "+cfg.watchLoss+" consecutive\n"+
-"Base Bet  : ₹"+cfg.baseBet+"\n"+
-"Max Level : "+cfg.maxLvl+"\n\n"+
+"Status   : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
+"Token    : "+(getToken(id).length>20?"✅ SET":"❌ MISSING")+"\n"+
+"AutoLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ /setcreds")+"\n"+
+"Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
+"WatchLoss: "+cfg.watchLoss+" consecutive\n"+
+"Base Bet : ₹"+cfg.baseBet+"\n"+
+"Max Level: "+cfg.maxLvl+"\n\n"+
 "Mart: ₹"+amounts.join("→₹")+"\n\n"+
-"Setup:\n"+
 "/setcreds 916381605525 PASSWORD\n"+
 "/setmytoken TOKEN",
             {reply_markup:autobetMenu});
@@ -891,71 +868,48 @@ function addHandlers(){
 
         if(text==="✅ Enable AutoBet"){
             const creds=userCreds[id]||{};
-            if(!getToken(id)&&!creds.phone)return send(id,"❌ /setcreds FULLPHONE PASSWORD\nor\n/setmytoken TOKEN");
+            if(!getToken(id)&&!creds.phone)return send(id,"❌ /setcreds FULLPHONE PASSWORD\nor /setmytoken TOKEN");
             autobetCfg[id].enabled=true;
             if(!getToken(id)&&creds.phone){
                 send(id,"🔄 Auto login...");
                 const ok=await autoLogin(id,msg.chat.id,true);
-                if(ok)send(id,"✅ AutoBet ON!\n💰 ₹"+autobetCfg[id].baseBet+" | Watch:"+(autobetCfg[id].watch?autobetCfg[id].watchLoss+"L":"OFF"),{reply_markup:userMenu(id)});
+                if(ok)send(id,"✅ AutoBet ON!\n₹"+autobetCfg[id].baseBet+" | Watch:"+(autobetCfg[id].watch?autobetCfg[id].watchLoss+"L":"OFF"),{reply_markup:userMenu(id)});
                 else send(id,"⚠️ Login fail. /setcreds பண்ணு.",{reply_markup:autobetMenu});
             } else {
-                send(id,"✅ AutoBet ON!\n💰 ₹"+autobetCfg[id].baseBet+" | Watch:"+(autobetCfg[id].watch?autobetCfg[id].watchLoss+"L":"OFF"),{reply_markup:userMenu(id)});
+                send(id,"✅ AutoBet ON!\n₹"+autobetCfg[id].baseBet+" | Watch:"+(autobetCfg[id].watch?autobetCfg[id].watchLoss+"L":"OFF"),{reply_markup:userMenu(id)});
             }
             return;
         }
         if(text==="❌ Disable AutoBet"){autobetCfg[id].enabled=false;return send(id,"❌ AutoBet OFF",{reply_markup:userMenu(id)});}
-        if(text==="👀 Watch Mode ON") {autobetCfg[id].watch=true;return send(id,"👀 Watch ON — "+autobetCfg[id].watchLoss+" consecutive losses → bet");}
+        if(text==="👀 Watch Mode ON") {autobetCfg[id].watch=true;return send(id,"👀 Watch ON — "+autobetCfg[id].watchLoss+" losses → bet");}
         if(text==="👀 Watch Mode OFF"){autobetCfg[id].watch=false;return send(id,"👀 Watch OFF — Direct bet!");}
-        if(text==="💰 Set Base Bet"){
-            adminState[id]={action:"setbase"};
-            const a=MULT.slice(0,autobetCfg[id].maxLvl).map(m=>autobetCfg[id].baseBet*m);
-            return send(id,"Base bet (₹)?\nCurrent: ₹"+autobetCfg[id].baseBet+"\nMart: ₹"+a.join("→₹")+"\n\nEnter amount:");
-        }
-        if(text==="📈 Set Max Level"){
-            adminState[id]={action:"setlvl"};
-            const a=MULT.slice(0,10).map(m=>autobetCfg[id].baseBet*m);
-            return send(id,"Max Level (1-10)?\nCurrent: "+autobetCfg[id].maxLvl+"\n\n"+a.map((v,i)=>"L"+(i+1)+": ₹"+v).join("\n")+"\n\nEnter level:");
-        }
-        if(text==="🔢 Set Watch Losses"){
-            adminState[id]={action:"setwloss"};
-            return send(id,"Watch losses?\nCurrent: "+autobetCfg[id].watchLoss+"\n\nExample: 2\n→ 2 consecutive losses → L1 bet\n→ Win → reset, watch again\n\nEnter number:");
-        }
+        if(text==="💰 Set Base Bet"){adminState[id]={action:"setbase"};return send(id,"Base bet ₹?\nCurrent: ₹"+autobetCfg[id].baseBet+"\nEnter:");}
+        if(text==="📈 Set Max Level"){adminState[id]={action:"setlvl"};const a=MULT.slice(0,10).map(m=>autobetCfg[id].baseBet*m);return send(id,"Max Level (1-10)?\nCurrent: "+autobetCfg[id].maxLvl+"\n\n"+a.map((v,i)=>"L"+(i+1)+":₹"+v).join("\n")+"\n\nEnter:");}
+        if(text==="🔢 Set Watch Losses"){adminState[id]={action:"setwloss"};return send(id,"Watch losses?\nCurrent: "+autobetCfg[id].watchLoss+"\n\n2 → 2 consecutive losses → bet\nEnter:");}
         if(text==="📊 AutoBet Status")return autobetStatus(msg.chat.id,id);
         if(text==="🔙 Back")return send(id,"Main Menu",{reply_markup:userMenu(id)});
 
         if(text==="🔑 My Token"){
             const tok=getToken(id),creds=userCreds[id]||{};
-            return send(id,
-"Token: "+(tok.length>20?"✅ ..."+tok.slice(-12):"❌ Not set")+"\n"+
-"Login : "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌ Not set")+"\n\n"+
-"/setcreds FULLPHONE PASSWORD\n"+
-"/setmytoken TOKEN\n"+
-"/login — Test login"
-            );
+            return send(id,"Token: "+(tok.length>20?"✅ ..."+tok.slice(-12):"❌")+"\nLogin: "+(creds.phone?"✅ "+creds.phone.slice(0,6)+"***":"❌")+"\n\n/setcreds FULLPHONE PASSWORD\n/setmytoken TOKEN\n/login — Test");
         }
 
         if(text==="▶️ Start Prediction"){
-            if(!hasAccess(id))return send(msg.chat.id,"❌ No access!\n📩 "+ADMIN_HANDLE+"\n🆔 ID: "+id);
+            if(!hasAccess(id))return send(msg.chat.id,"❌ No access!\n📩 "+ADMIN_HANDLE+"\nID: "+id);
             if(running[id])return send(msg.chat.id,"⚠️ Already running!");
-            if(!getToken(id)&&userCreds[id]?.phone){
-                await send(msg.chat.id,"🔄 Auto login...");
-                await autoLogin(id,msg.chat.id,true);
-            }
+            if(!getToken(id)&&userCreds[id]?.phone){await send(msg.chat.id,"🔄 Auto login...");await autoLogin(id,msg.chat.id,true);}
             running[id]=true;sentPeriods[id]=new Set();
             autobetState[id]={level:1,consecutiveLoss:0,inMart:false};
             const cfg=autobetCfg[id];
             await send(msg.chat.id,
-"🚀 ENGINE ON!\n\n"+
-"AutoBet : "+(cfg.enabled?"✅ ON":"❌ OFF")+"\n"+
-"Watch   : "+(cfg.watch?"ON ("+cfg.watchLoss+" consecutive losses)":"OFF")+"\n"+
-"Base Bet: ₹"+cfg.baseBet+" | Max Level: "+cfg.maxLvl
+"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
             );
             runPredict(id,msg.chat.id);
         }
         if(text==="🛑 Stop")   {running[id]=false;send(msg.chat.id,"🛑 Stopped.");}
         if(text==="📊 Stats")  showStats(msg.chat.id,id);
         if(text==="💰 Profit") profitReport(msg.chat.id,id);
-        if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\n🆔 ID: "+id);
+        if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
     });
 }
 
