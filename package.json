@@ -1,5 +1,13 @@
 {
+  "name": "autobetbot",
+  "version": "1.0.0",
+  "description": "Telegram Auto Bet Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
   "dependencies": {
-    "node-telegram-bot-api": "^0.67.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "axios": "^1.6.0"
   }
 }
