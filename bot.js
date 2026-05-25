@@ -10,7 +10,7 @@ const zlib        = require('zlib');
 // ============================================================
 //  CONFIG
 // ============================================================
-const BOT_TOKEN    = "8678093059:AAFgEhLODPG9vwS4dxSTODiPloc0sKzNuUw";
+const BOT_TOKEN    = "8735067591:AAGvNoMyIsBZ20QcH_jGbqH3sJcFYU2NOz8";
 const OWNER_ID     = 8321379592;
 const OWNER_PASS   = "2004";
 const ADMIN_HANDLE = "@OnlineEarningapp_bot";
