@@ -1,3 +1,7 @@
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.send('Bot is Running!'));
+app.listen(process.env.PORT || 3000);
 const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
 const crypto      = require('crypto');
